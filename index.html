@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paul's Deriv Live Predictor</title>
+<link rel="icon" href="favicon.ico" type="image/x-icon">
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; text-align: center; background: #f4f4f4; }
+h1 { margin-bottom: 20px; color: #333; }
+.index-selector { margin-bottom: 20px; }
+.index-panel { border: 2px solid #ccc; border-radius: 10px; margin-bottom: 20px; padding: 10px; background: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}
+.index-panel h2 { margin: 5px 0; color: #555; }
+.digits-container { display: flex; justify-content: center; flex-wrap: wrap; margin-bottom: 10px; }
+.digit-box { width: 35px; height: 35px; line-height: 35px; margin: 2px; border-radius: 5px; background: #e0e0e0; font-weight: bold; font-size: 18px; transition: all 0.3s; }
+.digit-box.repeating { background: #ff9800; color: #fff; animation: flash 0.5s ease-in-out; }
+@keyframes flash { 0% { transform: scale(1); } 50% { transform: scale(1.3); } 100% { transform: scale(1); } }
+.prediction { font-weight: bold; color: #2196f3; font-size: 22px; transition: all 0.3s; }
+.prediction.flash { color: #f44336; font-size: 26px; animation: flash 0.5s ease-in-out; }
+.error-log { color: red; font-weight: bold; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>Paul's Deriv Live Predictor</h1>
+
+<div class="index-selector">
+  <label>Select Indices to Track:</label>
+  <select id="indexSelect" multiple>
+    <option value="R_100">R_100</option>
+    <option value="R_50">R_50</option>
+    <option value="R_25">R_25</option>
+    <option value="R_10">R_10</option>
+    <option value="R_100_1s">R_100_1s</option>
+    <option value="R_50_1s">R_50_1s</option>
+    <option value="R_25_1s">R_25_1s</option>
+    <option value="R_10_1s">R_10_1s</option>
+  </select>
+  <button id="startBtn">Start Tracking</button>
+</div>
+
+<div id="dashboard"></div>
+<div class="error-log" id="errorLog"></div>
+
+<script type="module">
+const APP_ID = '114411'; // Your working Deriv App ID
+
+const patterns = [
+  { sequence: [4,8], predict: 2 },
+  { sequence: [4,7,8], predict: 2 },
+  { sequence: [4,7,9,8,3], predict: 2 },
+  { sequence: [7,4,5,4,0,3], predict: 2 },
+];
+
+const previousDigits = {};
+const panels = {};
+const dashboard = document.getElementById('dashboard');
+const indexSelect = document.getElementById('indexSelect');
+const startBtn = document.getElementById('startBtn');
+const errorLog = document.getElementById('errorLog');
+
+startBtn.addEventListener('click', () => {
+  const selectedSymbols = Array.from(indexSelect.selectedOptions).map(opt => opt.value);
+  dashboard.innerHTML = '';
+  errorLog.textContent = '';
+  selectedSymbols.forEach(symbol => {
+    previousDigits[symbol] = [];
+    const panel = document.createElement('div');
+    panel.className = 'index-panel';
+    panel.innerHTML = `
+      <h2>${symbol}</h2>
+      <div class="digits-container" id="digits-${symbol}"></div>
+      <div class="prediction" id="prediction-${symbol}">Prediction: -</div>
+    `;
+    dashboard.appendChild(panel);
+    panels[symbol] = {
+      digitsContainer: document.getElementById(`digits-${symbol}`),
+      prediction: document.getElementById(`prediction-${symbol}`)
+    };
+  });
+  startWebSocket(selectedSymbols);
+});
+
+function addDigit(symbol, digit, repeating=false) {
+  const container = panels[symbol].digitsContainer;
+  const box = document.createElement('div');
+  box.className = 'digit-box';
+  if(repeating) box.classList.add('repeating');
+  box.textContent = digit;
+  container.appendChild(box);
+  if(container.children.length > 20) container.removeChild(container.children[0]);
+}
+
+function showPrediction(symbol, predicted) {
+  const predDiv = panels[symbol].prediction;
+  predDiv.textContent = `Prediction → ${predicted}`;
+  predDiv.classList.add('flash');
+  setTimeout(()=>predDiv.classList.remove('flash'), 600);
+}
+
+function startWebSocket(symbols) {
+  const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}&l=EN`);
+
+  ws.onopen = () => {
+    symbols.forEach((symbol, index) => {
+      setTimeout(() => {
+        const req = { ticks: symbol, subscribe: 1 };
+        ws.send(JSON.stringify(req));
+      }, index * 500); // Increased delay to prevent WS closing
+    });
+  };
+
+  ws.onmessage = (msgEvent) => {
+    const data = JSON.parse(msgEvent.data);
+    if(data.msg_type==='tick' && data.tick && data.tick.quote!==undefined){
+      const symbol = data.tick.symbol || data.tick.contract_symbol;
+      const quote = data.tick.quote;
+      const digit = parseInt(String(Math.floor(quote)).slice(-1),10);
+
+      previousDigits[symbol].push(digit);
+      if(previousDigits[symbol].length>50) previousDigits[symbol].shift();
+
+      const len = previousDigits[symbol].length;
+      let repeating = false;
+      if(len>=2 && previousDigits[symbol][len-1]===previousDigits[symbol][len-2]) repeating = true;
+
+      addDigit(symbol, digit, repeating);
+
+      if(repeating){
+        const historyBefore = previousDigits[symbol].slice(0,len-2);
+        let predicted = '-';
+        for(let p of patterns){
+          const seq = p.sequence;
+          if(historyBefore.length >= seq.length){
+            const tail = historyBefore.slice(-seq.length);
+            if(JSON.stringify(tail)===JSON.stringify(seq)){
+              predicted = p.predict;
+              break;
+            }
+          }
+        }
+        showPrediction(symbol, predicted);
+      }
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.log('[WS ERROR]', err);
+    errorLog.textContent = 'WebSocket Error! Check console for details.';
+  };
+  ws.onclose = (event) => {
+    console.log('[WS CLOSED]', event);
+    errorLog.textContent = 'WebSocket Closed! Reload the page.';
+  };
+
+  setInterval(()=>ws.send(JSON.stringify({ping:1})),30000);
+}
+</script>
+
+</body>
+</html>
